@@ -1,0 +1,89 @@
+service: dailydownload
+frameworkVersion: '2'
+
+provider:
+  name: aws
+  runtime: nodejs12.x
+  lambdaHashingVersion: 20201221
+  variableSyntax: "\\${{([ ~:a-zA-Z0-9._@\\'\",\\-\\/\\(\\)]+?)}}" # notice the double quotes for yaml to ignore the escape characters!
+
+
+  timeout: 3
+  memorySize: 128
+
+  stage: dev
+  region: us-east-1
+
+  iamRoleStatements:
+    - Effect: "Allow"
+      Action:
+        - s3:ListBucket
+        - s3:PutObject
+        - s3:GetObject
+      Resource:
+        - !GetAtt UploadBucket.Arn
+        - !Join ["/", [!GetAtt UploadBucket.Arn, "*"]]
+    - Effect: Allow
+      Action:
+        - sqs:SendMessage
+      Resource:
+        - !GetAtt FailureQueue.Arn
+
+  environment:
+    UPLOAD_BUCKET: !Ref UploadBucket
+
+functions:
+  DailyDownload:
+    handler: DailyDownload.handler
+    events:
+      - schedule: 
+          rate: rate(24 hours)
+          enabled: false
+
+resources:
+  Resources:
+    UploadBucket:
+      Type: AWS::S3::Bucket
+      Properties:
+        BucketName: ${{self:service}}-upload-bucket-${{self:provider.stage}}
+      
+    BucketPolicy:
+      Type: AWS::S3::BucketPolicy
+      Properties:
+        Bucket: !Ref UploadBucket
+        PolicyDocument:
+          Statement:
+            - Effect: Allow
+              Action:
+                - s3:GetObject
+              Resource:
+                - !Join ["/", [!GetAtt UploadBucket.Arn, "files" , "*"]]
+              Principal: '*'
+
+            - Effect: Deny
+              Action:
+                - '*'
+              Resource:
+                - !Join ["/", [!GetAtt UploadBucket.Arn, "files" , "*"]]
+              Principal: '*'
+              Condition:
+                NotIpAddress:
+                  aws:SourceIp:
+                    - 1.1.1.1
+
+    FailureQueue:
+      Type: AWS::SQS::Queue
+      Properties:
+        QueueName: ${{self:service}}-failure-queue-${{self:provider.stage}}
+
+    EventInvokeConfig:
+      Type: AWS::Lambda::EventInvokeConfig
+      Properties:
+        FunctionName: !Ref DailyDownloadLambdaFunction
+        Qualifier: $LATEST
+        MaximumRetryAttempts: 1
+        DestinationConfig:
+          OnFailure:
+            Destination: !GetAtt FailureQueue.Arn
+            
+        
